@@ -4,7 +4,7 @@
      <arg name="port" value="9090"/>
   </include> -->
   <!-- CARLA connection -->
-  <arg name='host' default='localhost'/>
+  <arg name='host' default='carla'/>
   <arg name='port' default='2000'/>
   <arg name='timeout' default='200'/>
   <!-- Ego vehicle -->

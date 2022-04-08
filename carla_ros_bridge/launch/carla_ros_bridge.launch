@@ -7,7 +7,7 @@
   <param name="use_sim_time" value="True"/>
 
   <!-- the network connection for the python connection to CARLA -->
-  <arg name='host' default='localhost'/>
+  <arg name='host' default='carla'/>
   <arg name='port' default='2000'/>
   <arg name='timeout' default='200'/>
 
