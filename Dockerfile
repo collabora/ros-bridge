@@ -13,10 +13,11 @@ RUN /bin/bash -c 'source /opt/ros/noetic/setup.bash; \
                   bash /opt/carla-ros-bridge/install_dependencies.sh'
 
 COPY . /opt/carla-ros-bridge/src
+COPY ros_entrypoint.sh /
 
 RUN /bin/bash -c 'source /opt/ros/noetic/setup.bash && \
                   catkin_make install'
 
 WORKDIR /studio
 
-CMD ["caddy", "file-server", "--listen", ":8080"]
+CMD ["roslaunch", "carla_ros_bridge", "carla_ros_bridge_with_example_ego_vehicle.launch"]
