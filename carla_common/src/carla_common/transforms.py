@@ -117,6 +117,25 @@ def carla_rotation_to_ros_quaternion(carla_rotation):
     return ros_quaternion
 
 
+def carla_rotation_to_quaternion(carla_rotation: carla.Rotation):
+    """
+    Convert a carla rotation to a Global quaternion.
+
+    Considers the conversion from left-handed system (unreal) to right-handed
+    system (Global).
+    Considers the conversion from degrees (carla) to radians (Global).
+    
+    Args:
+        carla_rotation: the carla rotation.
+    
+    Returns:
+        a Global quaternion.
+    """
+    roll, pitch, yaw = carla_rotation_to_RPY(carla_rotation)
+    quat = euler2quat(roll, pitch, yaw)
+    return [quat[0], quat[1], quat[2], quat[3]]
+
+
 def carla_rotation_to_numpy_rotation_matrix(carla_rotation):
     """
     Convert a carla rotation to a ROS quaternion

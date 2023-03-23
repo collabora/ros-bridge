@@ -90,6 +90,57 @@ class Lidar(Sensor):
     def get_lidar_data(self):
         return self.lidar_data
 
+    def get_lidar_world_with_ring_index(self):
+        """
+        Adds a ring index to each lidar point.
+
+        Args:
+            lidar_data: point cloud data
+            lidar_config: point cloud configuration
+
+        Returns:
+            point cloud data with ring index 
+        """
+        lidar_data = self.transform_point_cloud_data_to_world(
+            self.lidar_data, self.carla_actor.get_transform())
+        channels = 32.0
+        lower_fov = -30.0
+        upper_fov = 10.0
+
+        norm = numpy.linalg.norm(lidar_data[:, :3], 2, axis=1)
+        pitch = numpy.arcsin(lidar_data[:, 2] / norm)
+
+        fov_down = lower_fov / 180.0 * numpy.pi
+        fov = (abs(lower_fov) + abs(upper_fov)) / 180.0 * numpy.pi
+
+        ring = (pitch + abs(fov_down)) / fov
+        ring *= channels
+        ring = numpy.floor(ring)
+        ring = numpy.minimum(channels - 1, ring)
+        ring = numpy.maximum(0, ring).astype(numpy.uint16)
+        ring = ring.reshape(-1, 1)
+
+        points = numpy.append(lidar_data, ring, axis=-1)
+        lidar_array = [[point[0], -point[1], point[2], point[3], point[4]] for point in points]
+        lidar_array = numpy.array(lidar_array).astype(numpy.float32)
+        return lidar_array, self.lidar_data.frame
+
+    def transform_point_cloud_data_to_world(self, lidar_data, lidar_transform):
+        """
+        Transform point cloud data to world coordinates.
+        Args:
+            lidar_data     : raw lidar data.
+            lidar_transform: lidar sensor transform.
+
+        Returns:
+            Tuple with point cloud, point cloud in world coordinates and intensity.
+        """
+        # Get the lidar data and convert it to a numpy array.
+        p_cloud_size = len(lidar_data)
+        p_cloud = numpy.copy(numpy.frombuffer(lidar_data.raw_data, dtype=numpy.dtype('f4')))
+        p_cloud = numpy.reshape(p_cloud, (p_cloud_size, 4))
+        return p_cloud
+
 
 class SemanticLidar(Sensor):
 

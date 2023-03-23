@@ -44,6 +44,9 @@
   <arg name="onnx_path_half" default="$(find carla_ros_bridge)/config/model3d_half.onnx"/>
   <arg name="trt_engine_path" default="$(find carla_ros_bridge)/config/model3d.engine"/>
   <arg name="trt_fp16" default="False"/>
+  <arg name="bevfusion_ckpt" default="$(find carla_ros_bridge)/config/bevfusion.pth"/>
+  <arg name="bevfusion_config" default="$(find carla_ros_bridge)/config/bevfusion/nuscenes/det/transfusion/secfpn/camera+lidar/swint_v0p075/convfuser.yaml"/>
+  <arg name="calibrated_sensor_cfg" default="$(find carla_ros_bridge)/config/calibrated_sensors.json"/>
 
 
   <arg name="map_file" default="$(find carla_ros_bridge)/config/$(arg town).yaml"/>
@@ -66,10 +69,9 @@
     <param name="register_all_sensors" value="$(arg register_all_sensors)"/>
     <param name="town" value="$(arg town)"/>
     <param name="ego_vehicle_role_name" value="$(arg ego_vehicle_role_name)"/>
-    <param name="onnx_path" value="$(arg onnx_path)"/>
-    <param name="onnx_path_half" value="$(arg onnx_path_half)"/>
-    <param name="trt_engine_path" value="$(arg trt_engine_path)"/>
-    <param name="trt_fp16" value="$(arg trt_fp16)"/>
+    <param name="bevfusion_ckpt" value="$(arg bevfusion_ckpt)"/>
+    <param name="bevfusion_config" value="$(arg bevfusion_config)"/>
+    <param name="calibrated_sensor_cfg" value="$(arg calibrated_sensor_cfg)"/>
   </node>
 
   <include file="$(find carla_spawn_objects)/launch/carla_example_ego_vehicle.launch">

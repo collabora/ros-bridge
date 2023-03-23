@@ -34,5 +34,15 @@ sudo apt-get install --no-install-recommends -y \
     python-is-python3 \
     $ADDITIONAL_PACKAGES
 
-python3 -m pip install --upgrade pip
-python$PYTHON_SUFFIX -m pip install -r $SCRIPT_DIR/requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r $SCRIPT_DIR/requirements.txt
+if [ "$CUDA_VER" = "cu112" ]; then
+    gdown --fuzzy https://drive.google.com/file/d/1ewbGql6WqopBZXJDnKFsTUN8yrAUqMaX/view?usp=sharing -O $SCRIPT_DIR/
+    python -m pip install torchvision==0.11.2
+    python -m pip install $SCRIPT_DIR/torch-1.10.0a0+git302ee7b-cp38-cp38-linux_x86_64.whl
+else
+    python -m pip install torch==1.10.1+$CUDA_VER torchvision==0.11.2+$CUDA_VER torchaudio==0.10.1 -f https://download.pytorch.org/whl/$CUDA_VER/torch_stable.html
+fi
+python -m pip install mmcv-full==1.4.0 -f https://download.openmmlab.com/mmcv/dist/$CUDA_VER/torch1.10.1/index.html
+python -m pip install mmdet==2.20
+python -m pip install --upgrade pyOpenSSL

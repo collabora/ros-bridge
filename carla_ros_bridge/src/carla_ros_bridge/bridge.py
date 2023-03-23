@@ -25,6 +25,7 @@ from distutils.version import LooseVersion
 from threading import Thread, Lock, Event
 
 import carla
+import cv2
 from geometry_msgs.msg import Pose
 
 from transforms3d.euler import euler2quat
@@ -49,7 +50,8 @@ from carla_ros_bridge.lidar import Lidar
 from carla_ros_bridge.lidar_to_rgb import LidarToRGB
 from carla_ros_bridge.vehicle import Vehicle
 from carla_ros_bridge.tf_sensor import TFSensor
-from carla_ros_bridge.sfa3d_tensorrt import FPNResnet18TRT
+from carla_ros_bridge.bev import BevFusion
+from carla_common.transforms import carla_rotation_to_quaternion
 
 
 class CarlaRosBridge(CompatibleNode):
@@ -153,19 +155,11 @@ class CarlaRosBridge(CompatibleNode):
                 self.new_subscription(CarlaControl, "/carla/control",
                                       lambda control: self.carla_control_queue.put(control.command),
                                       qos_profile=10, callback_group=self.callback_group)
-            
-            # 3d perception model init
-            self._model_3d_perception = self.init_tensorrt_model()
-            self.lidar_height_pos = 1.60
-            self.cam0_transform = carla.Transform(
-                carla.Location(x=0.0, y=0, z=self.lidar_height_pos),
-                carla.Rotation(pitch=0, yaw=0, roll=0))
-            self.cam1_transform = carla.Transform(
-                carla.Location(x=0.0, y=0.50, z=self.lidar_height_pos),
-                carla.Rotation(pitch=0, yaw=0, roll=0))
-            self.lidar_transform = carla.Transform(
-                carla.Location(x=0.0, y=0, z=self.lidar_height_pos),
-                carla.Rotation(pitch=0, yaw=0, roll=0))
+
+            self.bevfusion = BevFusion(
+                self.parameters["bevfusion_config"],
+                ckpt=self.parameters["bevfusion_ckpt"],
+                calibrated_sensor_cfg=self.parameters["calibrated_sensor_cfg"])
 
             # for bbox image publish
             self.n_rgb_cams = 0
@@ -402,7 +396,7 @@ class CarlaRosBridge(CompatibleNode):
             len(self.lidar.keys()) != len(self.carla_world.get_actors().filter('sensor.lidar.ray_cast')) or \
             self.lidar_to_camera is None:
             self.get_rgb_cams_and_publishers()
-            if len(self.rgb_cams.keys()) == 0: return
+            if self.n_rgb_cams != len(self.carla_world.get_actors().filter('sensor.camera.rgb')): return
 
         if self.lidar_to_camera is None:
             self.logwarn("Lidar overlay.. couldnt setup lidar_to_rgb.")
@@ -411,6 +405,7 @@ class CarlaRosBridge(CompatibleNode):
         walkers = self.carla_world.get_actors().filter('walker.*')
 
         for parent, rgb_cams in self.rgb_cams.items():
+            # if parent is None: return
             # check if lidar exists for the same parent
             curr_lidar = None
             if parent in self.lidar:
@@ -418,129 +413,58 @@ class CarlaRosBridge(CompatibleNode):
             else:
                 self.logwarn(f"lidar is None for {parent}")
 
+            # bevfusion inference
+            # prepare data
+            images = {}
+            frame = None
             for id_, rgb_cam in rgb_cams.items():
-                # filter vehicles & walkers by distance
-                vehicles = ClientSideBoundingBoxes.filter_by_distance(vehicles, rgb_cam.parent.carla_actor)
-                walkers = ClientSideBoundingBoxes.filter_by_distance(walkers, rgb_cam.parent.carla_actor)
-                bounding_boxes = ClientSideBoundingBoxes.get_bounding_boxes(
-                    vehicles, rgb_cam.carla_actor)
-                bounding_boxes_walkers = ClientSideBoundingBoxes.get_bounding_boxes(
-                    walkers, rgb_cam.carla_actor)
-                # bounding_boxes.extend(bounding_boxes_w)
-                img = rgb_cam.get_image()
                 frame = rgb_cam.get_frame()
-                if img is None: continue
-                # rgb to bgr for drawing bboxes and lidar points
-                img = np.ascontiguousarray(img[:, :, ::-1])
-
-                # lidar points
-                lidar_data = None
-                pred_image = None
-                if curr_lidar is not None:
-                    lidar_data = curr_lidar.get_lidar_data()
-
-                if self.lidar_to_camera is not None:
-                    if lidar_data is not None:
-                        if lidar_data.frame == frame:
-                            # draw
-                            image_w = float(rgb_cam.carla_actor.attributes.get("image_size_x"))
-                            image_h = float(rgb_cam.carla_actor.attributes.get("image_size_y"))
-                            img = self.lidar_to_camera.lidar_overlay(
-                                curr_lidar, lidar_data, img, rgb_cam, image_w, image_h)
-
-                            # tensorrt inference
-                            if 'rgb_view' not in rgb_cam.get_topic_prefix():
-                                pred_image = self.inference_tensorrt(
-                                    img[:, :, ::-1],
-                                    lidar_data,
-                                    rgb_cam,
-                                    curr_lidar
-                                )
-                        else:
-                            self.logwarn(
-                                f"Lidar overlay.. RGB {rgb_cam.get_topic_prefix()} and lidar not in sync.")
-                    else:
-                        self.logwarn("Lidar overlay.. lidar data is None.")
-                else:
-                    self.logwarn("Lidar Overlay.. couldnt setup lidar_to_camera.")
-
-                # draw vehicle & walker bboxes
-                img = ClientSideBoundingBoxes.draw_bboxes(
-                    bounding_boxes, img, CarlaRosBridge.BB_COLOR)
-                img = ClientSideBoundingBoxes.draw_bboxes(
-                    bounding_boxes_walkers, img, CarlaRosBridge.BB_COLOR_WALKERS)
-
-                # bgr to rgb
-                img = img[:, :, ::-1]
-
-                # get header msg 
-                header = rgb_cam.get_msg_header()
-
-                # publish bboxes
-                img_msg_bboxes_lidar = Camera.cv_bridge.cv2_to_compressed_imgmsg(img)
-                img_msg_bboxes_lidar.header = header
                 try:
-                    self.boxes_lidar_publishers[parent][id_].publish(img_msg_bboxes_lidar)
-                except Exception as e:
-                    self.logwarn(f"Publish bboxes with lidar exception {e}")
+                    images[rgb_cam.get_topic_prefix().split('/')[-1]] = cv2.cvtColor(rgb_cam.get_image(), cv2.COLOR_BGR2RGB)
+                except:
+                    return
+            ego2global_location = parent.carla_actor.get_transform().location
+            ego2global_translation = [ego2global_location.x, -ego2global_location.y, ego2global_location.z]
+            ego2global_translation[-1] = 0.
+            ego2global_rotation = carla_rotation_to_quaternion(parent.carla_actor.get_transform().rotation)
 
-                # publish predicted bboxes
-                if pred_image is not None:
-                    img_msg_bboxes_lidar_pred = Camera.cv_bridge.cv2_to_compressed_imgmsg(pred_image[:, :, ::-1])
-                    img_msg_bboxes_lidar_pred.header = header
-                    try:
-                        self.boxes_lidar_publishers_pred[parent][id_].publish(img_msg_bboxes_lidar_pred)
-                    except Exception as e:
-                        self.logwarn(f"Publish bboxes with lidar exception {e}")
+            if curr_lidar is not None:
+                lidar_data, lidar_frame = curr_lidar.get_lidar_world_with_ring_index()
+                if lidar_frame != frame: 
+                    self.logwarn(
+                        f"Bevfusion.. RGB {rgb_cam.get_topic_prefix().split('/')[-1]} and lidar not in sync.")
+                    continue
+                self.loginfo((ego2global_translation, ego2global_rotation))
+                output_images = self.bevfusion([images, lidar_data, ego2global_translation, ego2global_rotation])
+                if output_images is not None:
+                    for id_, rgb_cam in rgb_cams.items():
+                        header = rgb_cam.get_msg_header()
+                        img = output_images[rgb_cam.get_topic_prefix().split('/')[-1]]
+                        # publish bboxes
+                        img_msg_bboxes_lidar = Camera.cv_bridge.cv2_to_compressed_imgmsg(img)
+                        img_msg_bboxes_lidar.header = header
+                        try:
+                            self.boxes_lidar_publishers_pred[parent][id_].publish(img_msg_bboxes_lidar)
+                        except Exception as e:
+                            self.logwarn(f"Publish bboxes with lidar exception {e}")
 
-    def init_tensorrt_model(self):
-        """
-        Initialize tensorrt model.
-        """
-        fpn = FPNResnet18TRT(
-            self,
-            engine_path=self.parameters["trt_engine_path"],
-            onnx_path=self.parameters["onnx_path_half"] if self.parameters["trt_fp16"] else self.parameters["onnx_path"],
-            fp16=self.parameters["trt_fp16"])
-        self.loginfo("Loaded SFA3D TensorRT model for 3D perception.")
-        return fpn
+                        # publish original imagewith lidar overlay
+                        img = images[rgb_cam.get_topic_prefix().split('/')[-1]]
+                        img = img[:, :, ::-1]
 
-    def inference_tensorrt(self, img_rgb, lidar_data, rgb_cam, lidar):
-        """
-        Run TensorRT inference with current frame data.
+                        # draw lidar points
+                        image_w = float(rgb_cam.carla_actor.attributes.get("image_size_x"))
+                        image_h = float(rgb_cam.carla_actor.attributes.get("image_size_y"))
+                        img = self.lidar_to_camera.lidar_overlay(
+                            curr_lidar, curr_lidar.get_lidar_data(), img, rgb_cam, image_w, image_h)
 
-        :param img_rgb: rgb cam image
-        :type img_rgb: np.ndarray
-        :param lidar_data: raw lidar data
-        :type lidar_data: carla.LidarMeasurement
-        :param rgb_cam: rgb camera instance
-        :type rgb_cam: carla_ros_bridge.RgbCamera
-        :param lidar: Lidar instance
-        :type lidar: carla_ros_bridge.Lidar
-
-        :return rgb image with predicted 3d objects:
-        :rtype np.ndarray:
-        """
-        # Get the lidar data and convert it to a numpy array.
-        p_cloud_size = len(lidar_data)
-        p_cloud = np.copy(np.frombuffer(lidar_data.raw_data, dtype=np.dtype('f4')))
-        p_cloud = np.reshape(p_cloud, (p_cloud_size, 4))
-        p_cloud = [[point[0], -point[1], point[2], 1.0]
-                       for point in p_cloud]
-        p_cloud = np.array(p_cloud).astype(np.float32).reshape(-1, 4)
-
-        # prepare calibration data
-        P2 = rgb_cam.carla_actor.calibration
-        P2 = np.column_stack((P2, np.array([0, 0, 0])))
-        
-        calibs = {
-            'P2': P2.reshape((3, 4)),
-            'camera_transform': rgb_cam.carla_actor.get_transform(),
-            'lidar_transform': lidar.carla_actor.get_transform()
-        }
-
-        out_img = self._model_3d_perception(img_rgb, p_cloud, calibs)
-        return out_img
+                        # publish bboxes with lidar overlay
+                        img_msg_bboxes_lidar = Camera.cv_bridge.cv2_to_compressed_imgmsg(img)
+                        img_msg_bboxes_lidar.header = header
+                        try:
+                            self.boxes_lidar_publishers[parent][id_].publish(img_msg_bboxes_lidar)
+                        except Exception as e:
+                            self.logwarn(f"Publish bboxes with lidar exception {e}")
 
     def _synchronous_mode_update(self):
         """
@@ -700,17 +624,16 @@ def main(args=None):
     parameters['synchronous_mode'] = carla_bridge.get_param('synchronous_mode', True)
     parameters['synchronous_mode_wait_for_vehicle_control_command'] = carla_bridge.get_param(
         'synchronous_mode_wait_for_vehicle_control_command', False)
-    parameters['fixed_delta_seconds'] = carla_bridge.get_param('fixed_delta_seconds',
-                                                               0.05)
+    parameters['fixed_delta_seconds'] = carla_bridge.get_param('fixed_delta_seconds', 0.05)
     parameters['register_all_sensors'] = carla_bridge.get_param('register_all_sensors', True)
     parameters['town'] = carla_bridge.get_param('town', 'Town01')
     role_name = carla_bridge.get_param('ego_vehicle_role_name',
                                        ["hero", "ego_vehicle", "hero1", "hero2", "hero3"])
     parameters["ego_vehicle"] = {"role_name": role_name}
-    parameters["onnx_path"] = carla_bridge.get_param('onnx_path', None)
-    parameters["onnx_path_half"] = carla_bridge.get_param('onnx_path_half', None)
-    parameters["trt_engine_path"] = carla_bridge.get_param('trt_engine_path', None)
-    parameters["trt_fp16"] = carla_bridge.get_param('trt_fp16', False)
+    
+    parameters["bevfusion_ckpt"] = carla_bridge.get_param('bevfusion_ckpt', None)
+    parameters["bevfusion_config"] = carla_bridge.get_param('bevfusion_config', None)
+    parameters["calibrated_sensor_cfg"] = carla_bridge.get_param('calibrated_sensor_cfg', None)
 
     carla_bridge.loginfo("Trying to connect to {host}:{port}".format(
         host=parameters['host'], port=parameters['port']))
